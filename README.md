@@ -366,7 +366,15 @@ Configurable in `src/config.py`.
 
 ## Screenshots
 
-*Run the dashboard to see live visualisations.*
+| Segment Distribution & Revenue | Interactive Segment Filters |
+|---|---|
+| ![Segment distribution](docs/screenshots/segment-distribution.png) | ![Segment filters](docs/screenshots/segment-filters.png) |
+
+| Churn Predictions | Recommendations |
+|---|---|
+| ![Churn predictions](docs/screenshots/churn-predictions.png) | ![Recommendations](docs/screenshots/recommendations.png) |
+
+*Run `streamlit run dashboard/app.py` to explore the live dashboard.*
 
 ---
 
