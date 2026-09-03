@@ -1,0 +1,3 @@
+"""
+CustomerIQ — Tests package initializer.
+"""

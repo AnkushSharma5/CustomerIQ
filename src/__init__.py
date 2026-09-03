@@ -1,0 +1,3 @@
+"""
+CustomerIQ — Source package initializer.
+"""
