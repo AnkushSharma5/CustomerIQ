@@ -2,6 +2,8 @@
 
 **AI-Powered Customer Analytics, Segmentation, Recommendation & Churn Prediction Platform**
 
+🔗 **[Live Demo](https://customeriq-dashboard.streamlit.app/)**
+
 ---
 
 ## Overview
