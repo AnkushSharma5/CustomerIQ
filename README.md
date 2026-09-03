@@ -366,13 +366,13 @@ Configurable in `src/config.py`.
 
 ## Screenshots
 
-| Segment Distribution & Revenue | Interactive Segment Filters |
+| Dashboard Overview | Segment Distribution & Revenue |
 |---|---|
-| ![Segment distribution](docs/screenshots/segment-distribution.png) | ![Segment filters](docs/screenshots/segment-filters.png) |
+| ![Dashboard overview](docs/screenshots/dashboard-overview.png) | ![Segment distribution](docs/screenshots/segment-distribution.png) |
 
-| Churn Predictions | Recommendations |
+| Interactive Segment Filters | Churn Predictions |
 |---|---|
-| ![Churn predictions](docs/screenshots/churn-predictions.png) | ![Recommendations](docs/screenshots/recommendations.png) |
+| ![Segment filters](docs/screenshots/segment-filters.png) | ![Churn predictions](docs/screenshots/churn-predictions.png) |
 
 *Run `streamlit run dashboard/app.py` to explore the live dashboard.*
 
