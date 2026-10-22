@@ -110,5 +110,6 @@ streamlit run dashboard/app.py
 ## Important Notes
 
 - This is a **synthetic** dataset (not real customer data)
-- It is safe to use for portfolio and learning purposes
-- Do not commit large data files to Git (they are excluded by `.gitignore`)
+- The raw source tables are excluded from Git by `.gitignore`
+- The dashboard's reviewed processed outputs are stored separately in `data/output/`
+- The repository's MIT license applies to code, not to the source dataset or derived data

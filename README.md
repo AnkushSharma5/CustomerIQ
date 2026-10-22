@@ -231,6 +231,11 @@ pip install -r requirements.txt
 python run_pipeline.py
 ```
 
+The command reads source tables from `data/raw/` and writes the nine dashboard Parquet
+artifacts to `data/output/`. Source tables are not included in Git. The reviewed
+processed artifacts are included so the hosted dashboard can start without local
+files or a visitor-run pipeline.
+
 Expected output:
 ```
 ============================================================
@@ -257,6 +262,54 @@ streamlit run dashboard/app.py
 ```
 
 Navigate to `http://localhost:8501` in your browser.
+
+The dashboard resolves paths from the repository location, so it can also be started
+from another working directory. On startup, it checks that each published Parquet
+artifact can be read. If outputs are missing and all seven approved raw tables are
+available, it attempts the pipeline once for that app process. Otherwise, it shows a
+maintainer-facing diagnostic; visitors do not need to run commands.
+
+## Streamlit Community Cloud Deployment
+
+For the existing public app, use these settings in Streamlit Community Cloud:
+
+| Setting | Value |
+|---|---|
+| Repository | `AnkushSharma5/CustomerIQ` |
+| Branch | `main` |
+| App file | `dashboard/app.py` |
+| Python | `3.12` (the Community Cloud default) |
+
+Keep `requirements.txt` at the repository root. The nine reviewed files in
+`data/output/` are required for the first deployment:
+
+- `category_analytics.parquet`
+- `churn_feature_importance.parquet`
+- `churn_predictions.parquet`
+- `cohort_retention.parquet`
+- `customer_clv.parquet`
+- `customer_rfm.parquet`
+- `customer_segments.parquet`
+- `monthly_kpis.parquet`
+- `recommendations.parquet`
+
+They total about 8.4 MB and are regenerated locally with `python run_pipeline.py`
+after the source tables are installed. Raw files under `data/raw/`, the DuckDB
+database, and model files remain excluded from Git. The Parquet files are processed
+outputs from the public, fictitious theLook eCommerce dataset. In particular,
+`customer_segments.parquet` includes generated names and email-shaped profile values
+using only `example.com`, `example.net`, and `example.org` addresses; the dataset is
+synthetic and these are not real customer records. The repository's
+MIT license applies to the project code, not to Google's source dataset or its data
+terms.
+
+After pushing a commit to `main`, Community Cloud should detect the GitHub update and
+redeploy the app. Open [the public dashboard](https://customeriq-dashboard.streamlit.app/),
+confirm the sidebar lists all nine artifacts as **Ready**, then visit each of the
+seven sections and confirm its charts or customer views render. If the app shows an
+old version, use **Manage app → Reboot** in Community Cloud and check its build logs.
+The repository settings can be prepared here; the existing Community Cloud account
+settings must be verified in that service.
 
 ---
 
@@ -411,6 +464,9 @@ Configurable in `src/config.py`.
 ## License
 
 MIT License — see [LICENSE](LICENSE)
+
+The MIT license covers the repository code only. The source data and data-derived
+artifacts retain the source dataset's applicable terms.
 
 ---
 

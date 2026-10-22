@@ -13,6 +13,7 @@ Pages:
     6. Product & Category Analytics
     7. Cohort & Retention
 """
+import logging
 import sys
 from pathlib import Path
 
@@ -31,7 +32,10 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
+from src.artifacts import StartupRecovery, has_complete_raw_inputs
 from src.config import OUTPUT_DIR, OUTPUT_FILES
+
+logger = logging.getLogger("customeriq.dashboard")
 
 # ---------------------------------------------------------------------------
 # Page configuration
@@ -147,25 +151,69 @@ st.markdown("""
 # Data loading helpers
 # ---------------------------------------------------------------------------
 
+@st.cache_resource
+def get_startup_recovery() -> StartupRecovery:
+    """Keep the recovery lock and its one-attempt state for this app process."""
+    return StartupRecovery()
+
+
+@st.cache_data(ttl=300)
+def get_output_status() -> dict[str, dict[str, str | int | None]]:
+    """Validate all outputs, with a single recovery attempt if inputs are present."""
+    return get_startup_recovery().ensure_outputs(
+        raw_inputs_available=has_complete_raw_inputs(),
+    )
+
+
 @st.cache_data(ttl=300)
 def load_output(key: str) -> pd.DataFrame | None:
-    """Load an output parquet file. Returns None if not found."""
+    """Load a readable, non-empty output Parquet file; log details on failure."""
     path = OUTPUT_DIR / OUTPUT_FILES[key]
-    if path.exists():
-        return pd.read_parquet(path)
-    return None
+    try:
+        frame = pd.read_parquet(path)
+    except FileNotFoundError:
+        logger.warning("Dashboard output is missing: %s", path)
+        return None
+    except Exception:
+        logger.exception("Could not load dashboard output %s", path)
+        return None
+
+    if frame.empty:
+        logger.error("Dashboard output contains no records: %s", path)
+        return None
+    return frame
 
 
-def require_pipeline() -> bool:
-    """Return True if output files exist, else show a warning."""
-    rfm = load_output("customer_rfm")
-    if rfm is None:
-        st.warning(
-            "⚠️ Pipeline output not found. Please run `python run_pipeline.py` first, "
-            "then refresh this page."
+def require_artifacts(
+    *,
+    page_label: str,
+    required: tuple[str, ...] = (),
+    at_least_one: tuple[str, ...] = (),
+) -> bool:
+    """Show a safe diagnostic when a page's required artifacts are unavailable."""
+    statuses = get_output_status()
+    required_failures = [key for key in required if statuses[key]["status"] != "ready"]
+    alternative_failure = bool(at_least_one) and not any(
+        statuses[key]["status"] == "ready" for key in at_least_one
+    )
+    if not required_failures and not alternative_failure:
+        return True
+
+    failed_keys = required_failures or list(at_least_one)
+    failed_statuses = {statuses[key]["status"] for key in failed_keys}
+    filenames = ", ".join(OUTPUT_FILES[key] for key in failed_keys)
+    st.error(f"{page_label} data is not ready. Please notify the site maintainer.")
+    if "missing" in failed_statuses:
+        st.caption(
+            f"Missing: {filenames}. The maintainer should restore the published outputs "
+            "or regenerate them from the approved source dataset."
         )
-        return False
-    return True
+    if "unreadable" in failed_statuses or "empty" in failed_statuses:
+        st.caption(
+            f"One or more required files are empty or unreadable: {filenames}. "
+            "The maintainer should replace them with valid Parquet outputs."
+        )
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -211,11 +259,25 @@ page = PAGE_NAMES[selected_page_label]
 st.sidebar.markdown("---")
 st.sidebar.markdown("##### System Status")
 
-# Show which output files are available
-for key in ["customer_rfm", "churn_predictions", "recommendations", "monthly_kpis"]:
-    path = OUTPUT_DIR / OUTPUT_FILES[key]
-    icon = "🟢" if path.exists() else "🔴"
-    st.sidebar.markdown(f"{icon} `{OUTPUT_FILES[key]}`")
+# Report whether every artifact exists and can be read as a non-empty Parquet file.
+with st.spinner("Checking dashboard data..."):
+    artifact_status = get_output_status()
+
+all_artifacts_ready = all(
+    item["status"] == "ready" for item in artifact_status.values()
+)
+with st.sidebar.expander("Pipeline artifacts", expanded=not all_artifacts_ready):
+    status_labels = {
+        "ready": ("🟢", "Ready"),
+        "missing": ("🔴", "Missing"),
+        "unreadable": ("🟠", "Unreadable"),
+        "empty": ("🟡", "Empty"),
+    }
+    for key, filename in OUTPUT_FILES.items():
+        state = artifact_status[key]
+        icon, label = status_labels[state["status"]]
+        rows = f" · {state['rows']:,} rows" if state["rows"] is not None else ""
+        st.sidebar.markdown(f"{icon} `{filename}` — {label}{rows}")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(
@@ -244,7 +306,7 @@ if page == "overview":
     st.markdown('<div class="dashboard-title">Executive Overview</div>', unsafe_allow_html=True)
     st.markdown('<div class="dashboard-subtitle">Real-time performance metrics and high-level customer behavior summary</div>', unsafe_allow_html=True)
 
-    if not require_pipeline():
+    if not require_artifacts(page_label="Executive overview", required=("customer_rfm",)):
         st.stop()
 
     rfm = load_output("customer_rfm")
@@ -255,27 +317,50 @@ if page == "overview":
     # --- KPI Cards ---
     col1, col2, col3, col4, col5, col6 = st.columns(6)
 
-    total_customers = len(rfm) if rfm is not None else 0
-    total_revenue = segments["total_revenue"].sum() if segments is not None and "total_revenue" in segments.columns else 0
-    total_orders = segments["total_orders"].sum() if segments is not None and "total_orders" in segments.columns else 0
-    avg_order_value = (total_revenue / total_orders) if total_orders > 0 else 0
-    high_risk = (churn["risk_level"] == "High Risk").sum() if churn is not None else 0
-    repeat_rate = 0.0
+    total_customers = len(rfm) if rfm is not None else None
+    total_revenue = (
+        segments["total_revenue"].sum()
+        if segments is not None and "total_revenue" in segments.columns
+        else None
+    )
+    total_orders = (
+        segments["total_orders"].sum()
+        if segments is not None and "total_orders" in segments.columns
+        else None
+    )
+    avg_order_value = (
+        total_revenue / total_orders
+        if total_revenue is not None and total_orders is not None and total_orders > 0
+        else None
+    )
+    high_risk = (
+        (churn["risk_level"] == "High Risk").sum()
+        if churn is not None and "risk_level" in churn.columns
+        else None
+    )
+    repeat_rate = None
     if kpis is not None and "repeat_customer_rate" in kpis.columns:
         repeat_rate = kpis["repeat_customer_rate"].mean() * 100
 
     with col1:
-        st.markdown(kpi_card("Total Customers", f"{total_customers:,}"), unsafe_allow_html=True)
+        customer_value = f"{total_customers:,}" if total_customers is not None else "N/A"
+        st.markdown(kpi_card("Total Customers", customer_value), unsafe_allow_html=True)
     with col2:
-        st.markdown(kpi_card("Total Revenue", f"${total_revenue:,.0f}"), unsafe_allow_html=True)
+        revenue_value = f"${total_revenue:,.0f}" if total_revenue is not None else "N/A"
+        st.markdown(kpi_card("Total Revenue", revenue_value), unsafe_allow_html=True)
     with col3:
-        st.markdown(kpi_card("Total Orders", f"{total_orders:,}"), unsafe_allow_html=True)
+        orders_value = f"{total_orders:,}" if total_orders is not None else "N/A"
+        st.markdown(kpi_card("Total Orders", orders_value), unsafe_allow_html=True)
     with col4:
-        st.markdown(kpi_card("Avg Order Value", f"${avg_order_value:,.2f}"), unsafe_allow_html=True)
+        aov_value = f"${avg_order_value:,.2f}" if avg_order_value is not None else "N/A"
+        st.markdown(kpi_card("Avg Order Value", aov_value), unsafe_allow_html=True)
     with col5:
-        st.markdown(kpi_card("Repeat Rate", f"{repeat_rate:.1f}%"), unsafe_allow_html=True)
+        repeat_value = f"{repeat_rate:.1f}%" if repeat_rate is not None else "N/A"
+        st.markdown(kpi_card("Repeat Rate", repeat_value), unsafe_allow_html=True)
     with col6:
-        st.markdown(kpi_card("High-Risk Churn", f"{high_risk:,}", "⚠️ Attention Needed"), unsafe_allow_html=True)
+        risk_value = f"{high_risk:,}" if high_risk is not None else "N/A"
+        risk_delta = "⚠️ Attention Needed" if high_risk is not None else ""
+        st.markdown(kpi_card("High-Risk Churn", risk_value, risk_delta), unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -292,7 +377,7 @@ if page == "overview":
             )
             fig = apply_theme(fig)
             fig.update_traces(fillcolor="rgba(100,255,218,0.12)", line_color="#64ffda", line_width=2.5)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     with row1_col2:
         st.markdown('<div class="section-header">Customer Segments</div>', unsafe_allow_html=True)
@@ -306,7 +391,7 @@ if page == "overview":
             )
             fig = apply_theme(fig)
             fig.update_traces(textposition="inside", textinfo="percent+label")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     row2_col1, row2_col2 = st.columns(2)
 
@@ -319,7 +404,7 @@ if page == "overview":
                 color_discrete_sequence=["#7c83fd"],
             )
             fig = apply_theme(fig)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     with row2_col2:
         st.markdown('<div class="section-header">New vs Repeat Customers</div>', unsafe_allow_html=True)
@@ -335,7 +420,7 @@ if page == "overview":
             ))
             fig.update_layout(barmode="stack", xaxis_title="Month", yaxis_title="Customers")
             fig = apply_theme(fig)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
 
 # ===========================================================================
@@ -345,11 +430,17 @@ elif page == "segmentation":
     st.markdown('<div class="dashboard-title">👥 Customer Segmentation</div>', unsafe_allow_html=True)
     st.markdown('<div class="dashboard-subtitle">Multi-dimensional customer profiling, RFM scoring, and targeted segment filtering</div>', unsafe_allow_html=True)
 
-    if not require_pipeline():
+    if not require_artifacts(
+        page_label="Customer segmentation",
+        at_least_one=("customer_rfm", "customer_segments"),
+    ):
         st.stop()
 
     rfm = load_output("customer_rfm")
     segments = load_output("customer_segments")
+
+    if segments is None:
+        st.info("Customer profile fields are unavailable; RFM segmentation is still available.")
 
     # Combine segments and rfm safely
     if segments is not None and rfm is not None:
@@ -366,7 +457,7 @@ elif page == "segmentation":
         df_seg = None
 
     if df_seg is None or len(df_seg) == 0:
-        st.error("Segmentation data not available. Please run the pipeline first.")
+        st.error("Segmentation data is not available. Please notify the site maintainer.")
         st.stop()
 
     # Normalize suffix collisions if present (recency_x / recency_y -> recency)
@@ -541,7 +632,7 @@ elif page == "segmentation":
                     text_auto=True,
                 )
                 fig = apply_theme(fig)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
         with col_c2:
             st.markdown('<div class="section-header">Revenue Contribution by Segment</div>', unsafe_allow_html=True)
@@ -555,7 +646,7 @@ elif page == "segmentation":
                 )
                 fig = apply_theme(fig)
                 fig.update_traces(textposition="inside", textinfo="percent+label")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
         # RFM Behaviour Matrix Scatter Plot
         st.markdown('<div class="section-header">RFM Behaviour Matrix (Recency vs. Spend)</div>', unsafe_allow_html=True)
@@ -572,7 +663,7 @@ elif page == "segmentation":
             size_max=30,
         )
         fig_scatter = apply_theme(fig_scatter)
-        st.plotly_chart(fig_scatter, use_container_width=True)
+        st.plotly_chart(fig_scatter, width="stretch")
 
         # -------------------------------------------------------------------
         # Segment Summary Matrix Table
@@ -602,7 +693,7 @@ elif page == "segmentation":
                     "avg_frequency": "Avg Orders",
                     "revenue_share": "Rev Share (%)",
                 }).sort_values("Total Spend ($)", ascending=False),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -619,7 +710,7 @@ elif page == "segmentation":
 
         st.dataframe(
             filtered_df[display_cols].head(300),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -660,7 +751,7 @@ elif page == "customer360":
     st.markdown('<div class="dashboard-title">🔍 Customer 360 View</div>', unsafe_allow_html=True)
     st.markdown('<div class="dashboard-subtitle">Complete 360° view of customer profile, RFM scores, lifetime value, churn risk, and AI recommendations</div>', unsafe_allow_html=True)
 
-    if not require_pipeline():
+    if not require_artifacts(page_label="Customer 360", required=("customer_rfm",)):
         st.stop()
 
     rfm = load_output("customer_rfm")
@@ -670,7 +761,7 @@ elif page == "customer360":
     clv = load_output("clv")
 
     if rfm is None:
-        st.error("RFM data not available. Run the pipeline first.")
+        st.error("Customer data is not available. Please notify the site maintainer.")
         st.stop()
 
     # Customer selector
@@ -718,6 +809,8 @@ elif page == "customer360":
                 for field in ["country", "state", "city", "gender", "age", "email"]:
                     if field in cust_seg.index and pd.notna(cust_seg[field]):
                         st.markdown(f"- **{field.capitalize()}**: `{cust_seg[field]}`")
+            else:
+                st.caption("Customer profile details are unavailable for this customer.")
 
         with col2:
             st.markdown("**🛒 Purchase Metrics**")
@@ -737,6 +830,8 @@ elif page == "customer360":
             st.markdown("**🔮 AI Predictions**")
             if cust_clv is not None:
                 st.metric("Estimated CLV", f"${cust_clv.get('estimated_clv', 0):,.2f}")
+            else:
+                st.caption("CLV estimate unavailable.")
 
             if cust_churn is not None:
                 churn_prob = cust_churn.get("churn_probability", 0.0)
@@ -744,6 +839,8 @@ elif page == "customer360":
                 st.metric("Churn Probability", f"{churn_prob:.1%}")
                 color = {"High Risk": "🔴", "Medium Risk": "🟡", "Low Risk": "🟢"}.get(risk, "⚪")
                 st.markdown(f"**Risk Level**: {color} **{risk}**")
+            else:
+                st.caption("Churn score unavailable.")
 
         st.markdown("---")
 
@@ -765,6 +862,8 @@ elif page == "customer360":
                     st.divider()
             else:
                 st.info("No recommendations available for this customer.")
+        else:
+            st.info("Recommendations are currently unavailable.")
 
 
 # ===========================================================================
@@ -774,14 +873,14 @@ elif page == "churn":
     st.markdown('<div class="dashboard-title">⚠️ Churn Intelligence</div>', unsafe_allow_html=True)
     st.markdown('<div class="dashboard-subtitle">Machine Learning churn risk assessment and high-risk customer identification</div>', unsafe_allow_html=True)
 
-    if not require_pipeline():
+    if not require_artifacts(page_label="Churn intelligence", required=("churn_predictions",)):
         st.stop()
 
     churn = load_output("churn_predictions")
     fi = load_output("churn_feature_importance")
 
     if churn is None:
-        st.warning("Churn predictions not available. Run the pipeline with sufficient data.")
+        st.warning("Churn predictions are unavailable. Please notify the site maintainer.")
         st.stop()
 
     # KPI summary
@@ -813,7 +912,7 @@ elif page == "churn":
             text_auto=True,
         )
         fig = apply_theme(fig)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     with col_b:
         st.markdown('<div class="section-header">Churn Probability Density</div>', unsafe_allow_html=True)
@@ -825,7 +924,7 @@ elif page == "churn":
         fig = apply_theme(fig)
         fig.add_vline(x=0.30, line_dash="dash", line_color="#ffd93d", annotation_text="Medium (30%)")
         fig.add_vline(x=0.60, line_dash="dash", line_color="#ff6b6b", annotation_text="High (60%)")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     # Feature importance
     if fi is not None:
@@ -838,7 +937,7 @@ elif page == "churn":
             text_auto=".3f",
         )
         fig = apply_theme(fig)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     # High-risk table
     st.markdown('<div class="section-header">High-Risk Customers Action List</div>', unsafe_allow_html=True)
@@ -847,7 +946,7 @@ elif page == "churn":
     )
     st.dataframe(
         high_risk_df[["customer_id", "churn_probability", "risk_level"]].head(100),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -859,14 +958,17 @@ elif page == "recommendations":
     st.markdown('<div class="dashboard-title">💡 Product Recommendations</div>', unsafe_allow_html=True)
     st.markdown('<div class="dashboard-subtitle">Collaborative filtering recommendations backed by explainable segment affinity</div>', unsafe_allow_html=True)
 
-    if not require_pipeline():
+    if not require_artifacts(
+        page_label="Recommendations",
+        required=("recommendations", "customer_rfm"),
+    ):
         st.stop()
 
     recs = load_output("recommendations")
     rfm = load_output("customer_rfm")
 
     if recs is None or rfm is None:
-        st.warning("Recommendation data not available. Run the pipeline first.")
+        st.warning("Recommendation data is unavailable. Please notify the site maintainer.")
         st.stop()
 
     # Customer selector
@@ -920,7 +1022,7 @@ elif page == "recommendations":
         text_auto=True,
     )
     fig = apply_theme(fig)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 # ===========================================================================
@@ -930,13 +1032,13 @@ elif page == "products":
     st.markdown('<div class="dashboard-title">📦 Product & Category Analytics</div>', unsafe_allow_html=True)
     st.markdown('<div class="dashboard-subtitle">Revenue, order volume, and customer reach breakdown across product categories</div>', unsafe_allow_html=True)
 
-    if not require_pipeline():
+    if not require_artifacts(page_label="Product analytics", required=("category_analytics",)):
         st.stop()
 
     cat = load_output("category_analytics")
 
     if cat is None:
-        st.warning("Category analytics not available. Run the pipeline first.")
+        st.warning("Category analytics are unavailable. Please notify the site maintainer.")
         st.stop()
 
     col1, col2, col3 = st.columns(3)
@@ -961,7 +1063,7 @@ elif page == "products":
             labels={"total_revenue": "Revenue ($)", "category": "Category"},
         )
         fig = apply_theme(fig)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     with col_b:
         st.markdown('<div class="section-header">Unique Customers by Category (Top 15)</div>', unsafe_allow_html=True)
@@ -972,7 +1074,7 @@ elif page == "products":
             labels={"unique_customers": "Unique Customers", "category": "Category"},
         )
         fig = apply_theme(fig)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     # Full table
     st.markdown('<div class="section-header">Full Category Performance Matrix</div>', unsafe_allow_html=True)
@@ -985,7 +1087,7 @@ elif page == "products":
             "avg_selling_price": "Avg Price ($)",
             "product_count": "Products",
         }),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -997,14 +1099,14 @@ elif page == "cohort":
     st.markdown('<div class="dashboard-title">📅 Cohort & Retention Analysis</div>', unsafe_allow_html=True)
     st.markdown('<div class="dashboard-subtitle">Monthly customer acquisition cohort retention tracking</div>', unsafe_allow_html=True)
 
-    if not require_pipeline():
+    if not require_artifacts(page_label="Cohort retention", required=("cohort_retention",)):
         st.stop()
 
     cohort = load_output("cohort_retention")
     kpis = load_output("monthly_kpis")
 
     if cohort is None:
-        st.warning("Cohort data not available. Run the pipeline first.")
+        st.warning("Cohort data is unavailable. Please notify the site maintainer.")
         st.stop()
 
     # Prepare cohort matrix
@@ -1031,7 +1133,7 @@ elif page == "cohort":
     )
     fig = apply_theme(fig)
     fig.update_layout(height=520)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
     st.markdown("---")
 
@@ -1044,4 +1146,6 @@ elif page == "cohort":
             markers=True,
         )
         fig = apply_theme(fig)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
+    else:
+        st.info("Monthly acquisition data is currently unavailable.")
