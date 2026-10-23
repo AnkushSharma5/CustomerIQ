@@ -8,6 +8,8 @@ Provides:
 - Timing decorator
 """
 import logging
+import os
+import tempfile
 import time
 from pathlib import Path
 from functools import wraps
@@ -105,7 +107,16 @@ def timeit(func: Callable) -> Callable:
 def save_parquet(df: pd.DataFrame, path: Path, description: str = "") -> None:
     """Save a DataFrame to Parquet, creating parent directories as needed."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(path, index=False)
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    os.close(descriptor)
+    temp_path = Path(temp_name)
+    try:
+        df.to_parquet(temp_path, index=False)
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
     label = description or path.name
     logger.info("Saved %s: %d rows × %d cols → %s", label, len(df), len(df.columns), path)
 

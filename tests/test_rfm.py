@@ -101,6 +101,20 @@ class TestBuildRfmFeatures:
         min_recency_customer = rfm.loc[rfm["recency"].idxmin(), "customer_id"]
         assert min_recency_customer == 5
 
+    def test_observation_date_cannot_precede_purchase_data(self):
+        with pytest.raises(ValueError, match="earlier than the latest completed order"):
+            build_rfm_features(
+                self.orders,
+                self.items,
+                pd.Timestamp("2023-11-01", tz="UTC"),
+            )
+
+    def test_non_purchasing_statuses_are_not_used_as_rfm_fallback(self):
+        cancelled = self.orders.assign(status="cancelled")
+
+        with pytest.raises(ValueError, match="No completed orders found"):
+            build_rfm_features(cancelled, self.items, self.obs_date)
+
 
 class TestRfmScoring:
     def test_scores_range_1_to_5(self):
@@ -133,3 +147,46 @@ class TestRfmScoring:
         required = {"customer_id", "recency", "frequency", "monetary",
                     "r_score", "f_score", "m_score", "rfm_score"}
         assert required.issubset(set(rfm_scored.columns))
+
+    def test_equal_values_share_scores_independent_of_input_order(self):
+        rfm = pd.DataFrame({
+            "customer_id": range(1, 11),
+            "recency": [1, 1, 1, 2, 2, 3, 3, 4, 4, 4],
+            "frequency": [1, 1, 2, 2, 3, 3, 4, 4, 5, 5],
+            "monetary": [100, 100, 100, 200, 200, 300, 300, 400, 400, 400],
+        })
+
+        forward = compute_rfm_scores(rfm).set_index("customer_id")[
+            ["r_score", "f_score", "m_score"]
+        ].sort_index()
+        reversed_order = compute_rfm_scores(rfm.iloc[::-1]).set_index("customer_id")[
+            ["r_score", "f_score", "m_score"]
+        ].sort_index()
+
+        pd.testing.assert_frame_equal(forward, reversed_order)
+        for feature, score in (("recency", "r_score"), ("frequency", "f_score"), ("monetary", "m_score")):
+            tied = rfm.groupby(feature)["customer_id"].apply(list)
+            scored = forward[score]
+            assert all(scored.loc[ids].nunique() == 1 for ids in tied)
+
+    def test_constant_values_receive_one_shared_middle_score(self):
+        rfm = pd.DataFrame({
+            "customer_id": [1, 2, 3],
+            "recency": [5, 5, 5],
+            "frequency": [2, 2, 2],
+            "monetary": [100.0, 100.0, 100.0],
+        })
+
+        scored = compute_rfm_scores(rfm)
+
+        assert (scored[["r_score", "f_score", "m_score"]] == 3).all().all()
+
+    def test_missing_or_non_numeric_rfm_values_fail_clearly(self):
+        rfm = pd.DataFrame({
+            "customer_id": [1, 2],
+            "recency": [1, None],
+            "frequency": [1, 2],
+            "monetary": [10, 20],
+        })
+        with pytest.raises(ValueError, match="finite numeric"):
+            compute_rfm_scores(rfm)

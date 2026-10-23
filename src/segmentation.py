@@ -3,7 +3,7 @@ CustomerIQ — Customer Segmentation.
 
 Two-layer segmentation approach:
 1. RFM Rule-Based Segmentation (primary, explainable)
-   - Assign R/F/M scores (1-5 quintiles)
+    - Assign R/F/M scores (1-5 tie-aware percentile ranks)
    - Map score combinations to business segment labels
    - Fully documented, interview-ready rules
 
@@ -54,7 +54,22 @@ def compute_rfm_scores(rfm: pd.DataFrame) -> pd.DataFrame:
     pd.DataFrame
         Input plus: r_score, f_score, m_score, rfm_score.
     """
+    required = ["customer_id", "recency", "frequency", "monetary"]
+    missing = [column for column in required if column not in rfm.columns]
+    if missing:
+        raise ValueError(f"RFM data is missing required columns: {', '.join(missing)}")
+
     df = rfm.copy()
+    for column in ("recency", "frequency", "monetary"):
+        values = pd.to_numeric(df[column], errors="coerce")
+        if not np.isfinite(values.to_numpy(dtype=float, na_value=np.nan)).all():
+            raise ValueError(f"RFM column '{column}' must contain only finite numeric values.")
+        df[column] = values
+
+    if df.empty:
+        for column in ("r_score", "f_score", "m_score", "rfm_score"):
+            df[column] = pd.Series(index=df.index, dtype="int64")
+        return df
 
     # R score: invert so that low recency → high score
     df["r_score"] = _score_quintile(df["recency"], ascending=False)
@@ -78,15 +93,14 @@ def _score_quintile(series: pd.Series, ascending: bool = True) -> pd.Series:
     ascending=True  → higher values get higher scores (Frequency, Monetary)
     ascending=False → lower values get higher scores (Recency)
     """
-    try:
-        # Use quantile-based bins; duplicates='drop' handles ties gracefully
-        labels = [1, 2, 3, 4, 5] if ascending else [5, 4, 3, 2, 1]
-        return pd.qcut(series, q=RFM_BINS, labels=labels, duplicates="drop").astype(int)
-    except Exception:
-        # Fallback to rank-based scoring if qcut fails (too few unique values)
-        ranks = series.rank(method="first", ascending=ascending)
-        max_rank = ranks.max()
-        return ((ranks / max_rank) * (RFM_BINS - 1)).round().astype(int).clip(1, RFM_BINS)
+    # Percentile ranks avoid qcut's duplicate-edge failures. Average ranks make
+    # ties share the same score, so input row order cannot split equal customers
+    # across different business segments.
+    ranks = series.rank(method="average", ascending=ascending)
+    if len(series) <= 1:
+        return pd.Series(3, index=series.index, dtype="int64")
+    scaled = (ranks - 1) / (len(series) - 1) * (RFM_BINS - 1)
+    return (np.floor(scaled) + 1).clip(1, RFM_BINS).astype(int)
 
 
 # ---------------------------------------------------------------------------

@@ -12,17 +12,19 @@ Place all required dataset files in this directory (`data/raw/`) before running 
 
 Place these files here (either `.parquet` or `.csv` format):
 
-| File | Description | Typical Size |
-|------|-------------|-------------|
-| `users.parquet` / `users.csv` | Customer profiles | ~100K rows |
-| `orders.parquet` / `orders.csv` | Order headers | ~125K rows |
-| `order_items.parquet` / `order_items.csv` | Individual order line items | ~150K rows |
-| `products.parquet` / `products.csv` | Product catalog | ~29K rows |
-| `events.parquet` / `events.csv` | Clickstream events | ~2M+ rows |
-| `inventory_items.parquet` / `inventory_items.csv` | Inventory records | ~150K rows |
-| `distribution_centers.parquet` / `distribution_centers.csv` | Warehouse locations | ~10 rows |
+| File | Description |
+|------|-------------|
+| `users.parquet` / `users.csv` | Customer profiles |
+| `orders.parquet` / `orders.csv` | Order headers |
+| `order_items.parquet` / `order_items.csv` | Individual order line items |
+| `products.parquet` / `products.csv` | Product catalog |
+| `events.parquet` / `events.csv` | Clickstream events (loaded, not currently used by analytics) |
+| `inventory_items.parquet` / `inventory_items.csv` | Inventory records (loaded, not currently used by analytics) |
+| `distribution_centers.parquet` / `distribution_centers.csv` | Warehouse locations (loaded, not currently used by analytics) |
 
-The pipeline auto-detects Parquet (preferred) or CSV format.
+The pipeline auto-detects Parquet (preferred) or CSV format. Required columns for
+each table are defined in `src/config.py`; the validator rejects missing required
+tables, missing required columns, and invalid references.
 
 ---
 

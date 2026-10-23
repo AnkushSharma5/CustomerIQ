@@ -1,15 +1,14 @@
 """
-CustomerIQ — Generate Outputs Helper Script.
+CustomerIQ — Regenerate monthly KPI and category Parquet files.
 
-Regenerates all output Parquet files from the DuckDB database
-without re-running the full pipeline from scratch.
+Regenerates the two SQL-backed analytics files from DuckDB. Run the full
+pipeline to publish a consistent set of all nine dashboard artifacts.
 
 Usage:
     python scripts/generate_outputs.py
 
 Requires:
     - database/customeriq.duckdb (populated by run_pipeline.py)
-    - models/ (populated by run_pipeline.py)
 """
 import sys
 from pathlib import Path
@@ -24,9 +23,10 @@ from src.utils import save_parquet
 
 
 def main():
-    print("Regenerating CustomerIQ output files from DuckDB...\n")
+    print("Regenerating monthly KPI and category analytics from DuckDB...\n")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    failures = []
 
     # Monthly KPIs
     print("Generating monthly KPIs...")
@@ -35,6 +35,7 @@ def main():
         save_parquet(kpis, OUTPUT_DIR / OUTPUT_FILES["monthly_kpis"], "monthly_kpis")
     except Exception as e:
         print(f"  ⚠ monthly_kpis failed: {e}")
+        failures.append("monthly_kpis")
 
     # Category analytics
     print("Generating category analytics...")
@@ -43,8 +44,14 @@ def main():
         save_parquet(cat, OUTPUT_DIR / OUTPUT_FILES["category_analytics"], "category_analytics")
     except Exception as e:
         print(f"  ⚠ category_analytics failed: {e}")
+        failures.append("category_analytics")
 
-    print("\nDone. Run `streamlit run dashboard/app.py` to view results.")
+    if failures:
+        raise SystemExit(f"Failed to regenerate: {', '.join(failures)}")
+    print(
+        "\nDone. This helper only updates these two files; run `python run_pipeline.py` "
+        "to rebuild a consistent nine-artifact set."
+    )
 
 
 if __name__ == "__main__":

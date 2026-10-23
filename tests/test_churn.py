@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.feature_engineering import build_churn_features
+from src.feature_engineering import build_churn_features, build_customer_aggregates
 from src.churn import train_churn_models, generate_churn_predictions
 
 
@@ -40,7 +40,7 @@ def make_synthetic_churn_data(n_customers: int = 200, seed: int = 42):
         "id": range(1, n_customers + 1),
         "first_name": [f"User{i}" for i in range(n_customers)],
         "last_name": ["Test"] * n_customers,
-        "email": [f"u{i}@test.com" for i in range(n_customers)],
+        "email": [f"u{i}@example.com" for i in range(n_customers)],
         "age": rng.integers(18, 65, n_customers),
         "gender": rng.choice(["M", "F"], n_customers),
         "country": ["US"] * n_customers,
@@ -124,6 +124,54 @@ class TestBuildChurnFeatures:
         feat = build_churn_features(self.orders, self.items, self.users)
         assert feat["churned"].sum() > 0
         assert (feat["churned"] == 0).sum() > 0
+
+    def test_label_horizon_is_bounded_and_aov_uses_order_totals(self):
+        users = pd.DataFrame({
+            "id": [1, 2], "age": [30, 40], "gender": ["F", "M"], "country": ["US", "US"]
+        })
+        orders = pd.DataFrame({
+            "order_id": [1, 2, 3, 4],
+            "user_id": [1, 2, 1, 2],
+            "status": ["complete"] * 4,
+            "created_at": pd.to_datetime([
+                "2022-12-01", "2022-12-01", "2023-04-02", "2023-02-01"
+            ], utc=True),
+        })
+        items = pd.DataFrame({
+            "id": [1, 2, 3, 4, 5, 6],
+            "order_id": [1, 1, 1, 2, 3, 4],
+            "user_id": [1, 1, 1, 2, 1, 2],
+            "product_id": [1, 2, 3, 4, 5, 6],
+            "status": ["complete", "complete", "cancelled", "complete", "complete", "complete"],
+            "sale_price": [10.0, 30.0, 900.0, 100.0, 100.0, 50.0],
+        })
+
+        features = build_churn_features(
+            orders, items, users, future_days=90, cutoff_date_str="2023-01-01"
+        ).set_index("user_id")
+
+        # User 1 only orders again after the 90-day prediction horizon.
+        assert features.loc[1, "churned"] == 1
+        assert features.loc[2, "churned"] == 0
+        # The $900 cancelled item is excluded; AOV is computed per basket.
+        assert features.loc[1, "monetary"] == 40.0
+        assert features.loc[1, "avg_order_value"] == 40.0
+
+        aggregates = build_customer_aggregates(orders, items, users).set_index("customer_id")
+        assert aggregates.loc[1, "total_revenue"] == 140.0
+        assert aggregates.loc[1, "avg_order_value"] == 70.0
+        assert aggregates.loc[2, "avg_order_value"] == 75.0
+
+    def test_explicit_cutoff_requires_a_mature_label_window(self):
+        users, orders, items = make_synthetic_churn_data(10)
+        with pytest.raises(ValueError, match="full 90-day label window"):
+            build_churn_features(
+                orders,
+                items,
+                users,
+                future_days=90,
+                cutoff_date_str="2023-12-01",
+            )
 
 
 class TestTrainChurnModels:

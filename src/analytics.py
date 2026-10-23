@@ -55,7 +55,9 @@ def compute_monthly_kpis(
     comp_orders["created_at"] = pd.to_datetime(comp_orders["created_at"], utc=True)
     comp_items["created_at"] = pd.to_datetime(comp_items["created_at"], utc=True)
 
-    comp_orders["year_month"] = comp_orders["created_at"].dt.to_period("M")
+    comp_orders["year_month"] = (
+        comp_orders["created_at"].dt.tz_convert("UTC").dt.tz_localize(None).dt.to_period("M")
+    )
 
     # Revenue per order from items
     order_revenue = (
@@ -125,7 +127,9 @@ def compute_cohort_retention(
     completed_statuses = {"complete", "shipped", "processing"}
     comp = orders[orders["status"].isin(completed_statuses)].copy()
     comp["created_at"] = pd.to_datetime(comp["created_at"], utc=True)
-    comp["order_month"] = comp["created_at"].dt.to_period("M")
+    comp["order_month"] = (
+        comp["created_at"].dt.tz_convert("UTC").dt.tz_localize(None).dt.to_period("M")
+    )
 
     # Cohort = first order month per customer
     first_order = (

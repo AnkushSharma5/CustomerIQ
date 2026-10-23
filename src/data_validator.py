@@ -17,7 +17,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.config import REQUIRED_COLUMNS
+from src.config import REQUIRED_COLUMNS, REQUIRED_TABLES
 
 logger = logging.getLogger("customeriq.data_validator")
 
@@ -42,6 +42,17 @@ def validate_tables(tables: dict[str, pd.DataFrame]) -> dict[str, Any]:
     """
     report: dict[str, Any] = {"tables": {}, "passed": True}
 
+    for table_name in REQUIRED_TABLES:
+        if table_name not in tables:
+            report["tables"][table_name] = {
+                "passed": False,
+                "row_count": 0,
+                "column_count": 0,
+                "issues": [f"Required table '{table_name}' was not supplied."],
+                "warnings": [],
+            }
+            report["passed"] = False
+
     for table_name, df in tables.items():
         table_report = _validate_single_table(table_name, df)
         report["tables"][table_name] = table_report
@@ -53,6 +64,7 @@ def validate_tables(tables: dict[str, pd.DataFrame]) -> dict[str, Any]:
     report["referential_integrity"] = ref_errors
     if ref_errors:
         logger.warning("Referential integrity issues found: %d", len(ref_errors))
+        report["passed"] = False
 
     _print_validation_summary(report)
     return report
@@ -87,9 +99,20 @@ def _validate_single_table(table_name: str, df: pd.DataFrame) -> dict[str, Any]:
     if pk_col and pk_col in df.columns:
         dupe_count = df[pk_col].duplicated().sum()
         if dupe_count > 0:
-            warnings.append(
-                f"Table '{table_name}': {dupe_count} duplicate values in primary key '{pk_col}'."
-            )
+            duplicated = df[df[pk_col].duplicated(keep=False)]
+            conflicting_keys = duplicated.groupby(pk_col, dropna=False).nunique(
+                dropna=False
+            ).gt(1).any(axis=1)
+            if conflicting_keys.any():
+                issues.append(
+                    f"Table '{table_name}': {int(conflicting_keys.sum())} primary key "
+                    f"values in '{pk_col}' have conflicting records."
+                )
+            else:
+                warnings.append(
+                    f"Table '{table_name}': {dupe_count} duplicate values in primary key "
+                    f"'{pk_col}' have identical records and will be deduplicated."
+                )
 
     # 4. Missing values in key columns
     key_cols = _get_key_columns(table_name)
@@ -210,6 +233,22 @@ def _check_referential_integrity(tables: dict[str, pd.DataFrame]) -> list[str]:
             if orphans.sum() > 0:
                 errors.append(
                     f"{orphans.sum()} orders rows have user_id not in users table."
+                )
+
+    # An order item's customer must agree with the parent order owner.
+    if "order_items" in tables and "orders" in tables:
+        oi = tables["order_items"]
+        orders = tables["orders"]
+        if {"order_id", "user_id"}.issubset(oi.columns) and {
+            "order_id", "user_id"
+        }.issubset(orders.columns):
+            order_owners = orders.drop_duplicates("order_id").set_index("order_id")["user_id"]
+            expected_users = oi["order_id"].map(order_owners)
+            mismatches = expected_users.notna() & oi["user_id"].notna() & expected_users.ne(oi["user_id"])
+            if mismatches.sum() > 0:
+                errors.append(
+                    f"{mismatches.sum()} order_items rows have user_id values that "
+                    "do not match their parent order."
                 )
 
     return errors

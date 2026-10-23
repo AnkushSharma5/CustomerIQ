@@ -17,7 +17,7 @@ Executes all 14 pipeline steps in order:
     [10/14] Generating recommendations
     [11/14] Running cohort analysis
     [12/14] Calculating monthly KPIs
-    [13/14] Running product analytics
+    [13/14] Running category analytics
     [14/14] Exporting outputs
 
 All outputs are saved to data/output/.
@@ -36,7 +36,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import OUTPUT_DIR, OUTPUT_FILES
-from src.utils import print_header, print_step, print_success, print_error, setup_logging, save_parquet
+from src.utils import print_header, print_step, print_success, print_error, setup_logging
+from src.artifacts import publish_output_artifacts
 from src.data_loader import load_all_tables
 from src.data_validator import validate_tables
 from src.preprocessing import preprocess_all
@@ -49,7 +50,6 @@ from src.analytics import (
     compute_monthly_kpis,
     compute_cohort_retention,
     compute_category_analytics,
-    compute_product_analytics,
 )
 
 TOTAL_STEPS = 14
@@ -77,10 +77,9 @@ def run_pipeline() -> bool:
         if not validation_report["passed"]:
             print_error(
                 "Dataset validation found critical errors. "
-                "Review the issues above before continuing."
+                "Fix the reported issues before running analytics."
             )
-            # Continue anyway with warnings; fatal errors would have raised SystemExit
-            logger.warning("Continuing pipeline despite validation warnings.")
+            return False
 
         # ------------------------------------------------------------------ #
         # Step 2: Load raw data (already loaded in step 1, log summary)
@@ -140,40 +139,25 @@ def run_pipeline() -> bool:
         # Step 8: Build churn features
         # ------------------------------------------------------------------ #
         print_step(8, TOTAL_STEPS, "Building churn features")
-        try:
-            churn_features = build_churn_features(
-                tables["orders"], tables["order_items"], tables["users"]
-            )
-            churn_ok = True
-        except ValueError as exc:
-            print_error(f"Could not build churn features: {exc}")
-            churn_ok = False
-            churn_features = None
+        churn_features = build_churn_features(
+            tables["orders"], tables["order_items"], tables["users"]
+        )
 
         # ------------------------------------------------------------------ #
         # Step 9: Train churn models
         # ------------------------------------------------------------------ #
         print_step(9, TOTAL_STEPS, "Training churn models")
-        churn_results = None
-        churn_predictions = None
-
-        if churn_ok and churn_features is not None:
-            try:
-                churn_results = train_churn_models(churn_features)
-                churn_predictions = generate_churn_predictions(
-                    churn_features,
-                    churn_results["best_model"],
-                    churn_results["scaler"],
-                    churn_results["feature_cols"],
-                )
-                print_success(
-                    f"Best model: {churn_results['best_model_name']} | "
-                    f"ROC-AUC: {churn_results['results'][churn_results['best_model_name']]['roc_auc']:.4f}"
-                )
-            except ValueError as exc:
-                print_error(f"Churn model training failed: {exc}")
-                churn_results = None
-                churn_predictions = None
+        churn_results = train_churn_models(churn_features)
+        churn_predictions = generate_churn_predictions(
+            churn_features,
+            churn_results["best_model"],
+            churn_results["scaler"],
+            churn_results["feature_cols"],
+        )
+        print_success(
+            f"Best model: {churn_results['best_model_name']} | "
+            f"ROC-AUC: {churn_results['results'][churn_results['best_model_name']]['roc_auc']:.4f}"
+        )
 
         # ------------------------------------------------------------------ #
         # Step 10: Generate recommendations
@@ -204,11 +188,10 @@ def run_pipeline() -> bool:
         logger.info("Monthly KPIs: %d months.", len(monthly_kpis))
 
         # ------------------------------------------------------------------ #
-        # Step 13: Run product analytics
+        # Step 13: Run category analytics
         # ------------------------------------------------------------------ #
-        print_step(13, TOTAL_STEPS, "Running product analytics")
+        print_step(13, TOTAL_STEPS, "Running category analytics")
         category_analytics = compute_category_analytics(tables["order_items"], tables["products"])
-        product_analytics = compute_product_analytics(tables["order_items"], tables["products"])
         logger.info("Category analytics: %d categories.", len(category_analytics))
 
         # ------------------------------------------------------------------ #
@@ -216,43 +199,30 @@ def run_pipeline() -> bool:
         # ------------------------------------------------------------------ #
         print_step(14, TOTAL_STEPS, "Exporting outputs")
 
-        # RFM + segments
-        save_parquet(rfm_segmented, OUTPUT_DIR / OUTPUT_FILES["customer_rfm"], "customer_rfm")
-
         # Customer segments (full profile)
         # Ensure we have segment column
         segments_out = customer_full.copy()
-        save_parquet(segments_out, OUTPUT_DIR / OUTPUT_FILES["customer_segments"], "customer_segments")
-
-        # Churn predictions
-        if churn_predictions is not None:
-            save_parquet(churn_predictions, OUTPUT_DIR / OUTPUT_FILES["churn_predictions"], "churn_predictions")
-
-        # Churn feature importance
-        if churn_results is not None:
-            save_parquet(
-                churn_results["feature_importance"],
-                OUTPUT_DIR / OUTPUT_FILES["churn_feature_importance"],
-                "churn_feature_importance",
-            )
-
-        # Monthly KPIs
-        save_parquet(monthly_kpis, OUTPUT_DIR / OUTPUT_FILES["monthly_kpis"], "monthly_kpis")
 
         # Cohort retention (reset index for parquet)
         cohort_out = cohort_retention.reset_index()
         cohort_out.columns = [str(c) for c in cohort_out.columns]
-        save_parquet(cohort_out, OUTPUT_DIR / OUTPUT_FILES["cohort_retention"], "cohort_retention")
-
-        # Category analytics
-        save_parquet(category_analytics, OUTPUT_DIR / OUTPUT_FILES["category_analytics"], "category_analytics")
-
-        # Recommendations
-        save_parquet(recommendations, OUTPUT_DIR / OUTPUT_FILES["recommendations"], "recommendations")
 
         # CLV
         clv_out = customer_full[["customer_id", "estimated_clv", "annual_frequency"]].copy()
-        save_parquet(clv_out, OUTPUT_DIR / OUTPUT_FILES["clv"], "customer_clv")
+
+        # Publish a complete, schema-checked output set only after every stage
+        # has succeeded. This prevents old artifacts surviving a failed stage.
+        publish_output_artifacts({
+            "customer_rfm": rfm_segmented,
+            "customer_segments": segments_out,
+            "churn_predictions": churn_predictions,
+            "churn_feature_importance": churn_results["feature_importance"],
+            "monthly_kpis": monthly_kpis,
+            "cohort_retention": cohort_out,
+            "category_analytics": category_analytics,
+            "recommendations": recommendations,
+            "clv": clv_out,
+        })
 
         elapsed = time.perf_counter() - start_time
         print()

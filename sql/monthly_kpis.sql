@@ -45,7 +45,12 @@ SELECT
     COUNT(DISTINCT CASE WHEN mb.order_month = fo.first_month THEN mb.user_id END)
                                                                 AS new_customers,
     COUNT(DISTINCT CASE WHEN mb.order_month != fo.first_month THEN mb.user_id END)
-                                                                AS repeat_customers
+                                                                AS repeat_customers,
+    ROUND(
+        COUNT(DISTINCT CASE WHEN mb.order_month != fo.first_month THEN mb.user_id END)
+        * 1.0 / NULLIF(COUNT(DISTINCT mb.user_id), 0),
+        4
+    )                                                           AS repeat_customer_rate
 FROM monthly_base mb
 LEFT JOIN first_orders fo ON mb.user_id = fo.user_id
 GROUP BY mb.order_month

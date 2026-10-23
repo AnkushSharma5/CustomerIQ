@@ -28,7 +28,7 @@ def make_users(n: int = 10) -> pd.DataFrame:
         "id": range(1, n + 1),
         "first_name": [f"First{i}" for i in range(n)],
         "last_name": [f"Last{i}" for i in range(n)],
-        "email": [f"user{i}@test.com" for i in range(n)],
+        "email": [f"user{i}@example.com" for i in range(n)],
         "age": [25 + i for i in range(n)],
         "gender": ["M" if i % 2 == 0 else "F" for i in range(n)],
         "country": ["US"] * n,
@@ -158,6 +158,37 @@ class TestValidateTables:
         report = validate_tables(tables)
         ri_errors = report.get("referential_integrity", [])
         assert len(ri_errors) > 0
+        assert report["passed"] is False
+
+    def test_missing_required_table_fails_validation(self):
+        tables = make_all_tables()
+        del tables["events"]
+
+        report = validate_tables(tables)
+
+        assert report["passed"] is False
+        assert report["tables"]["events"]["passed"] is False
+        assert any("not supplied" in issue for issue in report["tables"]["events"]["issues"])
+
+    def test_order_item_customer_must_match_parent_order(self):
+        tables = make_all_tables()
+        tables["order_items"].loc[0, "user_id"] = 10
+
+        report = validate_tables(tables)
+
+        assert report["passed"] is False
+        assert any("parent order" in issue for issue in report["referential_integrity"])
+
+    def test_conflicting_primary_key_duplicates_fail_validation(self):
+        tables = make_all_tables()
+        conflicting = tables["users"].iloc[[0]].copy()
+        conflicting.loc[:, "email"] = "different@example.com"
+        tables["users"] = pd.concat([tables["users"], conflicting], ignore_index=True)
+
+        report = validate_tables(tables)
+
+        assert report["passed"] is False
+        assert any("conflicting records" in issue for issue in report["tables"]["users"]["issues"])
 
     def test_negative_price_warning(self):
         tables = make_all_tables()

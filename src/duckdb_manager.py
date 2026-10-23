@@ -19,6 +19,13 @@ from src.config import DATABASE_PATH, SQL_DIR
 logger = logging.getLogger("customeriq.duckdb_manager")
 
 
+def _quote_identifier(identifier: str) -> str:
+    """Safely quote a DuckDB identifier used in a statement."""
+    if not isinstance(identifier, str) or not identifier:
+        raise ValueError("DuckDB table names must be non-empty strings.")
+    return '"' + identifier.replace('"', '""') + '"'
+
+
 # ---------------------------------------------------------------------------
 # Connection factory
 # ---------------------------------------------------------------------------
@@ -55,17 +62,26 @@ def load_tables_to_duckdb(
         Path to the DuckDB database file.
     """
     conn = get_connection(db_path)
-
-    for table_name, df in tables.items():
-        logger.info("Loading '%s' into DuckDB (%d rows)...", table_name, len(df))
-        # DROP TABLE IF EXISTS guarantees idempotent execution
-        conn.execute(f"DROP TABLE IF EXISTS {table_name}")
-        conn.register("_temp_df", df)
-        conn.execute(f"CREATE TABLE {table_name} AS SELECT * FROM _temp_df")
-        conn.unregister("_temp_df")
-        logger.info("  [OK] Table '%s' created.", table_name)
-
-    conn.close()
+    try:
+        conn.begin()
+        for table_name, df in tables.items():
+            quoted_table = _quote_identifier(table_name)
+            logger.info("Loading '%s' into DuckDB (%d rows)...", table_name, len(df))
+            # Replace all source tables as one transaction; a failed import
+            # leaves the previous database contents intact.
+            conn.execute(f"DROP TABLE IF EXISTS {quoted_table}")
+            conn.register("_temp_df", df)
+            try:
+                conn.execute(f"CREATE TABLE {quoted_table} AS SELECT * FROM _temp_df")
+            finally:
+                conn.unregister("_temp_df")
+            logger.info("  [OK] Table '%s' created.", table_name)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     logger.info("All tables loaded into DuckDB: %s", db_path)
 
 
@@ -140,7 +156,7 @@ def get_table_row_count(table_name: str, db_path: Path = DATABASE_PATH) -> int:
     """Return the row count of a DuckDB table."""
     conn = get_connection(db_path)
     try:
-        result = conn.execute(f"SELECT count(*) FROM {table_name}").fetchone()
+        result = conn.execute(f"SELECT count(*) FROM {_quote_identifier(table_name)}").fetchone()
         return result[0] if result else 0
     finally:
         conn.close()

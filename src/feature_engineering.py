@@ -22,6 +22,29 @@ from src.config import CHURN_FUTURE_DAYS, CHURN_CUTOFF_DATE
 
 logger = logging.getLogger("customeriq.feature_engineering")
 
+COMPLETED_STATUSES = {"complete", "shipped", "processing"}
+
+
+def _items_for_completed_orders(
+    orders: pd.DataFrame,
+    order_items: pd.DataFrame,
+) -> pd.DataFrame:
+    """Return completed line items attributed to their parent order owner."""
+    completed_orders = orders.loc[
+        orders["status"].isin(COMPLETED_STATUSES), ["order_id", "user_id"]
+    ].drop_duplicates("order_id")
+    items = order_items.loc[
+        order_items["status"].isin(COMPLETED_STATUSES)
+        & order_items["order_id"].isin(completed_orders["order_id"])
+    ].copy()
+
+    # The order header is the source of truth for customer ownership. Validation
+    # reports mismatches, and this assignment prevents item-level IDs from
+    # silently moving revenue between customers if a caller skips validation.
+    order_owners = completed_orders.set_index("order_id")["user_id"]
+    items["user_id"] = items["order_id"].map(order_owners)
+    return items
+
 
 # ---------------------------------------------------------------------------
 # RFM features
@@ -54,14 +77,10 @@ def build_rfm_features(
     orders = orders.copy()
     orders["created_at"] = pd.to_datetime(orders["created_at"], utc=True)
 
-    completed_statuses = {"complete", "shipped", "processing"}
-    completed_orders = orders[orders["status"].isin(completed_statuses)].copy()
-    completed_items = order_items[order_items["status"].isin(completed_statuses)].copy()
-
-    if len(completed_orders) == 0:
-        logger.warning("No completed orders found. Using all orders for RFM.")
-        completed_orders = orders.copy()
-        completed_items = order_items.copy()
+    completed_orders = orders[orders["status"].isin(COMPLETED_STATUSES)].copy()
+    if completed_orders.empty:
+        raise ValueError("No completed orders found; RFM cannot be computed.")
+    completed_items = _items_for_completed_orders(orders, order_items)
 
     # Observation date: use max date in dataset if None
     if observation_date is None:
@@ -71,6 +90,13 @@ def build_rfm_features(
 
     if observation_date.tzinfo is None:
         observation_date = observation_date.tz_localize("UTC")
+    else:
+        observation_date = observation_date.tz_convert("UTC")
+    latest_order_date = completed_orders["created_at"].max()
+    if observation_date < latest_order_date:
+        raise ValueError(
+            "observation_date cannot be earlier than the latest completed order."
+        )
     logger.info("RFM observation date: %s", observation_date)
 
     # Recency: days since last purchase
@@ -160,29 +186,46 @@ def build_churn_features(
         One row per customer with features and 'churned' label (0 or 1).
     """
     # Ensure timezone-aware timestamps
+    if future_days <= 0:
+        raise ValueError("future_days must be a positive integer.")
+
     orders = orders.copy()
     orders["created_at"] = pd.to_datetime(orders["created_at"], utc=True)
+    completed_statuses = COMPLETED_STATUSES
+    completed_orders = orders[orders["status"].isin(completed_statuses)].copy()
+    if completed_orders.empty:
+        raise ValueError("No completed orders are available to build churn features.")
 
-    max_date = orders["created_at"].max()
+    max_date = completed_orders["created_at"].max()
+    if pd.isna(max_date):
+        raise ValueError("Completed orders do not contain valid timestamps.")
 
     # Cutoff date
     if cutoff_date_str:
-        cutoff = pd.Timestamp(cutoff_date_str, tz="UTC")
+        cutoff = pd.Timestamp(cutoff_date_str)
+        cutoff = cutoff.tz_localize("UTC") if cutoff.tzinfo is None else cutoff.tz_convert("UTC")
     else:
         cutoff = max_date - pd.Timedelta(days=future_days)
+
+    future_end = cutoff + pd.Timedelta(days=future_days)
+    if max_date < future_end:
+        raise ValueError(
+            f"The completed-order history ends at {max_date.isoformat()}, before the "
+            f"full {future_days}-day label window ends at {future_end.isoformat()}."
+        )
 
     logger.info(
         "Churn cutoff: %s | Future window: %d days (until %s)",
         cutoff.date(), future_days, max_date.date(),
     )
 
-    completed_statuses = {"complete", "shipped", "processing"}
-    completed_orders = orders[orders["status"].isin(completed_statuses)].copy()
-
     # Historical orders (before cutoff)
     hist = completed_orders[completed_orders["created_at"] < cutoff].copy()
-    # Future orders (after cutoff)
-    future = completed_orders[completed_orders["created_at"] >= cutoff].copy()
+    # Label only purchases in the configured horizon, including its endpoint.
+    future = completed_orders[
+        (completed_orders["created_at"] >= cutoff)
+        & (completed_orders["created_at"] <= future_end)
+    ].copy()
 
     if len(hist) == 0:
         raise ValueError(
@@ -198,11 +241,14 @@ def build_churn_features(
     last_order = hist.groupby("user_id")["created_at"].max().rename("last_order_date")
     first_order = hist.groupby("user_id")["created_at"].min().rename("first_order_date")
 
-    hist_items = order_items[order_items["order_id"].isin(hist["order_id"])].copy()
+    hist_items = _items_for_completed_orders(hist, order_items)
     hist_items["sale_price"] = pd.to_numeric(hist_items["sale_price"], errors="coerce")
 
-    monetary = hist_items.groupby("user_id")["sale_price"].sum().rename("monetary")
-    avg_order_value = hist_items.groupby("user_id")["sale_price"].mean().rename("avg_order_value")
+    order_totals = hist_items.groupby(["user_id", "order_id"], as_index=False).agg(
+        order_total=("sale_price", "sum")
+    )
+    monetary = order_totals.groupby("user_id")["order_total"].sum().rename("monetary")
+    avg_order_value = order_totals.groupby("user_id")["order_total"].mean().rename("avg_order_value")
     n_unique_products = hist_items.groupby("user_id")["product_id"].nunique().rename("n_unique_products")
 
     # Merge all features
@@ -265,12 +311,11 @@ def build_customer_aggregates(
     pd.DataFrame
         One row per customer with purchase statistics.
     """
-    completed_statuses = {"complete", "shipped", "processing"}
     orders = orders.copy()
     orders["created_at"] = pd.to_datetime(orders["created_at"], utc=True)
 
-    comp_orders = orders[orders["status"].isin(completed_statuses)].copy()
-    comp_items = order_items[order_items["status"].isin(completed_statuses)].copy()
+    comp_orders = orders[orders["status"].isin(COMPLETED_STATUSES)].copy()
+    comp_items = _items_for_completed_orders(orders, order_items)
 
     # Order-level aggregations
     order_agg = comp_orders.groupby("user_id").agg(
@@ -282,9 +327,14 @@ def build_customer_aggregates(
     # Item-level aggregations
     item_agg = comp_items.groupby("user_id").agg(
         total_revenue=("sale_price", "sum"),
-        avg_order_value=("sale_price", "mean"),
         n_unique_products=("product_id", "nunique"),
     ).reset_index()
+
+    order_totals = comp_items.groupby(["user_id", "order_id"], as_index=False).agg(
+        order_total=("sale_price", "sum")
+    )
+    avg_order_value = order_totals.groupby("user_id")["order_total"].mean().rename("avg_order_value")
+    item_agg = item_agg.merge(avg_order_value, on="user_id", how="left")
 
     # Merge
     agg = order_agg.merge(item_agg, on="user_id", how="left")

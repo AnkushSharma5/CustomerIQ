@@ -1,7 +1,7 @@
 """
 CustomerIQ — Recommendation Engine.
 
-Approach: Collaborative Filtering based on customer segments + category affinity.
+Approach: Segment-level product popularity with customer purchase exclusion.
 
 Methodology:
 1. For each customer, identify which categories/products they have purchased.

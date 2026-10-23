@@ -10,7 +10,7 @@ Pages:
     3. Customer 360
     4. Churn Intelligence
     5. Recommendations
-    6. Product & Category Analytics
+    6. Category Analytics
     7. Cohort & Retention
 """
 import logging
@@ -22,9 +22,6 @@ DASHBOARD_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = DASHBOARD_DIR.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-import warnings
-warnings.filterwarnings("ignore")
 
 import pandas as pd
 import numpy as np
@@ -157,16 +154,34 @@ def get_startup_recovery() -> StartupRecovery:
     return StartupRecovery()
 
 
+def _artifact_signature() -> tuple[tuple[str, int, int] | tuple[str, None, None], ...]:
+    """Return a cheap cache key that changes when an artifact is replaced."""
+    signature = []
+    for key, filename in OUTPUT_FILES.items():
+        path = OUTPUT_DIR / filename
+        try:
+            stat = path.stat()
+        except OSError:
+            signature.append((key, None, None))
+        else:
+            signature.append((key, stat.st_mtime_ns, stat.st_size))
+    return tuple(signature)
+
+
 @st.cache_data(ttl=300)
-def get_output_status() -> dict[str, dict[str, str | int | None]]:
+def _get_output_status(signature: tuple) -> dict[str, dict[str, str | int | None]]:
     """Validate all outputs, with a single recovery attempt if inputs are present."""
     return get_startup_recovery().ensure_outputs(
         raw_inputs_available=has_complete_raw_inputs(),
     )
 
 
+def get_output_status() -> dict[str, dict[str, str | int | None]]:
+    return _get_output_status(_artifact_signature())
+
+
 @st.cache_data(ttl=300)
-def load_output(key: str) -> pd.DataFrame | None:
+def _load_output(key: str, file_version: tuple[int, int] | None) -> pd.DataFrame | None:
     """Load a readable, non-empty output Parquet file; log details on failure."""
     path = OUTPUT_DIR / OUTPUT_FILES[key]
     try:
@@ -182,6 +197,19 @@ def load_output(key: str) -> pd.DataFrame | None:
         logger.error("Dashboard output contains no records: %s", path)
         return None
     return frame
+
+
+def load_output(key: str) -> pd.DataFrame | None:
+    if get_output_status()[key]["status"] != "ready":
+        return None
+    path = OUTPUT_DIR / OUTPUT_FILES[key]
+    try:
+        stat = path.stat()
+    except OSError:
+        file_version = None
+    else:
+        file_version = (stat.st_mtime_ns, stat.st_size)
+    return _load_output(key, file_version)
 
 
 def require_artifacts(
@@ -213,6 +241,11 @@ def require_artifacts(
             f"One or more required files are empty or unreadable: {filenames}. "
             "The maintainer should replace them with valid Parquet outputs."
         )
+    if "schema_mismatch" in failed_statuses:
+        st.caption(
+            f"One or more required files have an incompatible schema: {filenames}. "
+            "The maintainer should regenerate them with the current pipeline."
+        )
     return False
 
 
@@ -241,7 +274,7 @@ def apply_theme(fig: go.Figure) -> go.Figure:
 # Sidebar navigation
 # ---------------------------------------------------------------------------
 st.sidebar.markdown('<div class="dashboard-title" style="font-size:1.6rem;">🎯 CustomerIQ</div>', unsafe_allow_html=True)
-st.sidebar.markdown("<p style='color:#64748b;font-size:0.8rem;margin-top:-10px;'>AI Customer Intelligence Platform</p>", unsafe_allow_html=True)
+st.sidebar.markdown("<p style='color:#64748b;font-size:0.8rem;margin-top:-10px;'>Customer Analytics Platform</p>", unsafe_allow_html=True)
 st.sidebar.markdown("---")
 
 PAGE_NAMES = {
@@ -250,7 +283,7 @@ PAGE_NAMES = {
     "🔍 Customer 360": "customer360",
     "⚠️ Churn Intelligence": "churn",
     "💡 Recommendations": "recommendations",
-    "📦 Product & Category": "products",
+    "📦 Category Analytics": "products",
     "📅 Cohort & Retention": "cohort",
 }
 selected_page_label = st.sidebar.radio("Navigate", list(PAGE_NAMES.keys()), label_visibility="collapsed")
@@ -272,6 +305,7 @@ with st.sidebar.expander("Pipeline artifacts", expanded=not all_artifacts_ready)
         "missing": ("🔴", "Missing"),
         "unreadable": ("🟠", "Unreadable"),
         "empty": ("🟡", "Empty"),
+        "schema_mismatch": ("🟠", "Schema mismatch"),
     }
     for key, filename in OUTPUT_FILES.items():
         state = artifact_status[key]
@@ -282,7 +316,7 @@ with st.sidebar.expander("Pipeline artifacts", expanded=not all_artifacts_ready)
 st.sidebar.markdown("---")
 st.sidebar.markdown(
     '<div style="font-size:0.72rem;color:#64748b;">'
-    'theLook eCommerce Dataset<br>© 2024 CustomerIQ Platform</div>',
+    'theLook eCommerce Dataset<br>CustomerIQ</div>',
     unsafe_allow_html=True,
 )
 
@@ -304,7 +338,7 @@ def kpi_card(label: str, value: str, delta: str = "") -> str:
 # ===========================================================================
 if page == "overview":
     st.markdown('<div class="dashboard-title">Executive Overview</div>', unsafe_allow_html=True)
-    st.markdown('<div class="dashboard-subtitle">Real-time performance metrics and high-level customer behavior summary</div>', unsafe_allow_html=True)
+    st.markdown('<div class="dashboard-subtitle">Dataset snapshot metrics and customer behavior summary</div>', unsafe_allow_html=True)
 
     if not require_artifacts(page_label="Executive overview", required=("customer_rfm",)):
         st.stop()
@@ -749,7 +783,7 @@ elif page == "segmentation":
 # ===========================================================================
 elif page == "customer360":
     st.markdown('<div class="dashboard-title">🔍 Customer 360 View</div>', unsafe_allow_html=True)
-    st.markdown('<div class="dashboard-subtitle">Complete 360° view of customer profile, RFM scores, lifetime value, churn risk, and AI recommendations</div>', unsafe_allow_html=True)
+    st.markdown('<div class="dashboard-subtitle">Customer profile, RFM scores, estimated lifetime value, churn risk, and recommendations</div>', unsafe_allow_html=True)
 
     if not require_artifacts(page_label="Customer 360", required=("customer_rfm",)):
         st.stop()
@@ -1026,13 +1060,13 @@ elif page == "recommendations":
 
 
 # ===========================================================================
-# PAGE 6: PRODUCT & CATEGORY ANALYTICS
+# PAGE 6: CATEGORY ANALYTICS
 # ===========================================================================
 elif page == "products":
-    st.markdown('<div class="dashboard-title">📦 Product & Category Analytics</div>', unsafe_allow_html=True)
-    st.markdown('<div class="dashboard-subtitle">Revenue, order volume, and customer reach breakdown across product categories</div>', unsafe_allow_html=True)
+    st.markdown('<div class="dashboard-title">📦 Category Analytics</div>', unsafe_allow_html=True)
+    st.markdown('<div class="dashboard-subtitle">Revenue, order volume, and customer reach by product category</div>', unsafe_allow_html=True)
 
-    if not require_artifacts(page_label="Product analytics", required=("category_analytics",)):
+    if not require_artifacts(page_label="Category analytics", required=("category_analytics",)):
         st.stop()
 
     cat = load_output("category_analytics")
