@@ -34,7 +34,7 @@ customer_rfm AS (
         co.user_id                                        AS customer_id,
         MAX(co.created_at)                                AS last_purchase_date,
         DATE_DIFF('day', MAX(co.created_at), (SELECT obs_date FROM observation))
-                                                          AS recency,
+                                                        AS recency,
         COUNT(DISTINCT co.order_id)                       AS frequency,
         COALESCE(SUM(orv.order_total), 0)                 AS monetary
     FROM completed_orders co

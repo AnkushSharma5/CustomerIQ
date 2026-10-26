@@ -768,14 +768,15 @@ elif page == "segmentation":
         |--------------|-------------|---------------|--------------|--------------------------|
         | **Champions** | 4–5 | 4–5 | 4–5 | Reward loyalty, early access to new products |
         | **Loyal Customers** | 3–5 | 4–5 | Any | Upsell higher value products, ask for reviews |
-        | **Potential Loyalists** | 4–5 | 2–3 | Any | Offer membership, recommend sub-categories |
-        | **New Customers** | 4–5 | 1 | Any | Onboarding support, discount on second purchase |
+        | **New Customers** | 4–5 | Any | Exactly 1 completed order; encourage a second purchase |
+        | **Potential Loyalists** | 4–5 | 2–3 | Any | Recent customers not already assigned as New Customers |
         | **Promising** | 3 | 1–3 | Any | Create brand awareness, limited time offers |
         | **At Risk** | 2 | 3–5 | Any | Re-engagement campaigns, personalized emails |
         | **Cannot Lose Them** | 1 | 4–5 | Any | Win-back calls, aggressive retention offers |
         | **Hibernating** | 2 | 1–2 | Any | Re-create interest with relevant deals |
         | **Lost Customers** | 1 | 1–2 | Any | Low priority re-engagement |
         """)
+        st.caption("New Customers uses completed-order frequency (exactly one order), not the frequency score. Recent one-order customers take priority over score-based segments.")
 
 
 # ===========================================================================
@@ -990,7 +991,7 @@ elif page == "churn":
 # ===========================================================================
 elif page == "recommendations":
     st.markdown('<div class="dashboard-title">💡 Product Recommendations</div>', unsafe_allow_html=True)
-    st.markdown('<div class="dashboard-subtitle">Collaborative filtering recommendations backed by explainable segment affinity</div>', unsafe_allow_html=True)
+    st.markdown('<div class="dashboard-subtitle">Segment-based popularity</div>', unsafe_allow_html=True)
 
     if not require_artifacts(
         page_label="Recommendations",

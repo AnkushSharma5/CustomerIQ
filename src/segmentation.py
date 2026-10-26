@@ -111,8 +111,8 @@ def _score_quintile(series: pd.Series, ascending: bool = True) -> pd.Series:
 #
 # Champions         : R=5, F=4-5, M=4-5  → best customers
 # Loyal Customers   : F=4-5               → frequent buyers
+# New Customers     : R=4-5, 1 order      → recent first/only purchase
 # Potential Loyalists: R=4-5, F=2-3       → recent, not yet frequent
-# New Customers     : R=4-5, F=1          → bought recently, first time
 # Promising         : R=3-4               → showing activity
 # At Risk           : R=2, F=3-4          → used to buy often, now inactive
 # Cannot Lose Them  : R=1, F=4-5          → were top customers, now gone
@@ -120,10 +120,10 @@ def _score_quintile(series: pd.Series, ascending: bool = True) -> pd.Series:
 # Lost Customers    : R=1, F=1-2          → very long inactive, low frequency
 
 SEGMENT_RULES: list[dict] = [
+    {"name": "New Customers",      "r_min": 4, "r_max": 5, "frequency": 1, "m_min": 1, "m_max": 5},
     {"name": "Champions",          "r_min": 4, "r_max": 5, "f_min": 4, "f_max": 5, "m_min": 4, "m_max": 5},
     {"name": "Loyal Customers",    "r_min": 3, "r_max": 5, "f_min": 4, "f_max": 5, "m_min": 1, "m_max": 5},
     {"name": "Potential Loyalists","r_min": 4, "r_max": 5, "f_min": 2, "f_max": 3, "m_min": 1, "m_max": 5},
-    {"name": "New Customers",      "r_min": 4, "r_max": 5, "f_min": 1, "f_max": 1, "m_min": 1, "m_max": 5},
     {"name": "Promising",          "r_min": 3, "r_max": 3, "f_min": 1, "f_max": 3, "m_min": 1, "m_max": 5},
     {"name": "At Risk",            "r_min": 2, "r_max": 2, "f_min": 3, "f_max": 5, "m_min": 1, "m_max": 5},
     {"name": "Cannot Lose Them",   "r_min": 1, "r_max": 1, "f_min": 4, "f_max": 5, "m_min": 1, "m_max": 5},
@@ -142,7 +142,7 @@ def assign_segments(rfm_scored: pd.DataFrame) -> pd.DataFrame:
     Parameters
     ----------
     rfm_scored : pd.DataFrame
-        Must have columns: customer_id, r_score, f_score, m_score.
+        Must have columns: customer_id, frequency, r_score, f_score, m_score.
 
     Returns
     -------
@@ -155,10 +155,13 @@ def assign_segments(rfm_scored: pd.DataFrame) -> pd.DataFrame:
     for rule in SEGMENT_RULES:
         mask = (
             df["r_score"].between(rule["r_min"], rule["r_max"])
-            & df["f_score"].between(rule["f_min"], rule["f_max"])
             & df["m_score"].between(rule["m_min"], rule["m_max"])
             & (df["segment"] == "Other")  # only assign if not already labelled
         )
+        if "f_min" in rule:
+            mask &= df["f_score"].between(rule["f_min"], rule["f_max"])
+        if "frequency" in rule:
+            mask &= df["frequency"].eq(rule["frequency"])
         df.loc[mask, "segment"] = rule["name"]
 
     seg_counts = df["segment"].value_counts()

@@ -89,6 +89,88 @@ class TestAssignSegments:
         result = assign_segments(self.rfm_scored)
         assert result["customer_id"].nunique() == len(result)
 
+    def test_recent_one_order_customer_is_new_despite_frequency_score_tie(self):
+        scored = pd.DataFrame({
+            "customer_id": [1],
+            "frequency": [1],
+            "r_score": [4],
+            "f_score": [2],
+            "m_score": [3],
+        })
+
+        result = assign_segments(scored)
+
+        assert result.loc[0, "segment"] == "New Customers"
+
+    def test_one_order_rule_precedes_frequency_score_segments(self):
+        scored = pd.DataFrame({
+            "customer_id": [1],
+            "frequency": [1],
+            "r_score": [4],
+            "f_score": [4],
+            "m_score": [5],
+        })
+
+        result = assign_segments(scored)
+
+        assert result.loc[0, "segment"] == "New Customers"
+
+    @pytest.mark.parametrize(
+        ("r_score", "expected"),
+        [(3, "Promising"), (4, "New Customers"), (5, "New Customers")],
+    )
+    def test_new_customer_recency_boundary(self, r_score, expected):
+        scored = pd.DataFrame({
+            "customer_id": [1],
+            "frequency": [1],
+            "r_score": [r_score],
+            "f_score": [2],
+            "m_score": [3],
+        })
+
+        result = assign_segments(scored)
+
+        assert result.loc[0, "segment"] == expected
+
+    def test_repeat_recent_customer_remains_potential_loyalist(self):
+        scored = pd.DataFrame({
+            "customer_id": [1],
+            "frequency": [2],
+            "r_score": [4],
+            "f_score": [2],
+            "m_score": [3],
+        })
+
+        result = assign_segments(scored)
+
+        assert result.loc[0, "segment"] == "Potential Loyalists"
+
+    def test_score_grid_assigns_exactly_one_known_segment_per_customer(self):
+        import itertools
+
+        scored = pd.DataFrame(
+            [
+                {
+                    "customer_id": i,
+                    "frequency": 1,
+                    "r_score": r_score,
+                    "f_score": f_score,
+                    "m_score": m_score,
+                }
+                for i, (r_score, f_score, m_score) in enumerate(
+                    itertools.product(range(1, 6), repeat=3)
+                )
+            ]
+        )
+
+        result = assign_segments(scored)
+        valid_segments = {rule["name"] for rule in SEGMENT_RULES} | {"Other"}
+
+        assert len(result) == 125
+        assert result["customer_id"].nunique() == 125
+        assert result["segment"].notna().all()
+        assert set(result["segment"]).issubset(valid_segments)
+
 
 class TestEstimateCLV:
     def test_clv_non_negative(self):
